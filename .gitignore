@@ -1,5 +1,7 @@
-# Ocean Shallows 公开仓库：仅发布单文件 WebGL 页面
+# Ocean Shallows 公开仓库：仅发布页面、跳转页与说明文档
 # 其余本地项目、生成图素材、专家包与 .workbuddy 记忆一律不入库
 *
 !.gitignore
+!README.md
+!index.html
 !ocean-shallows.html
