@@ -334,11 +334,16 @@ function flushPulses(){
   }
 }
 function stepSim(steps){
+  /* keep the sim framebuffer bound across sub-steps instead of bouncing back to the
+     default framebuffer between each pass; identical pixels, fewer state changes */
+  simQuad.material=SIM_STEP;
   for(let i=0;i<steps;i++){
     SIM_STEP.uniforms.uState.value=simA.texture;
-    runPass(SIM_STEP,simB);
+    renderer.setRenderTarget(simB);
+    renderer.render(simScene,simCam);
     const t=simA;simA=simB;simB=t;
   }
+  renderer.setRenderTarget(null);
 }
 
 /* ==================== baked seabed (one-off render target) ==================== */
@@ -605,25 +610,33 @@ const waterMat=new THREE.ShaderMaterial({uniforms:waterUniforms,
         col*=1.0-0.28*smoothstep(3.6,0.0,r)*uWhirl.z;
       }
       float sandMask=smoothstep(0.006,-0.010,d);
-      float ripple=sin(p.y*320.0+fbm(p*26.0)*13.0+p.x*22.0)*0.5+0.5;
-      vec3 sand=mix(vec3(0.86,0.75,0.55),vec3(0.98,0.91,0.73),ripple*0.55+0.28);
-      sand*=0.95+0.10*vnoise(p*520.0);
-      float ph=fract(uTime/8.2);
-      float reach=0.048*(ph<0.26?smoothstep(0.0,0.26,ph):1.0-smoothstep(0.26,1.0,ph));
-      reach*=1.0-uCalm*0.78;
-      float front=-0.004-reach;
-      float wet=smoothstep(front+0.012,front-0.030,d)*smoothstep(-0.10,-0.02,d);
-      sand=mix(sand,sand*vec3(0.62,0.68,0.66),wet*0.78);
-      sand+=pow(max(L.y,0.0),8.0)*wet*vec3(0.20,0.26,0.25)*(0.5+0.5*sin(uTime*1.1+p.x*30.0));
-      float lace=fbm(p*vec2(150.0,115.0)+vec2(uTime*0.30,0.0));
-      float band=smoothstep(0.017,0.0,abs(d-front))*smoothstep(0.36,0.62,lace+0.20);
-      float holes=1.0-0.55*step(0.62,vnoise(p*vec2(300.0,240.0)+uTime*0.12));
-      float foam=band*holes;
-      float breakFoam=smoothstep(0.022,-0.004,abs(d-0.006))*
-        (0.42+0.58*fbm(p*vec2(95.0,72.0)+vec2(uTime*0.55,0.0)));
-      breakFoam*=1.0-uCalm*0.75;
-      vec3 beach=mix(sand,vec3(0.94,0.99,0.99),clamp(foam*1.15+breakFoam*0.9,0.0,1.0));
-      beach+=vec3(0.06,0.10,0.10)*foam;
+      vec3 beach=vec3(0.0);
+      float breakFoam=0.0;
+      /* sandMask is exactly 0 for d>=0.006 and the shoreline highlight below is
+         exactly 0 for |d|>=0.010, so for d>=0.010 none of this block can affect
+         the output. Skip it for the open-water majority of the screen - identical
+         pixels, far fewer noise evaluations. */
+      if(d<0.010){
+        float ripple=sin(p.y*320.0+fbm(p*26.0)*13.0+p.x*22.0)*0.5+0.5;
+        vec3 sand=mix(vec3(0.86,0.75,0.55),vec3(0.98,0.91,0.73),ripple*0.55+0.28);
+        sand*=0.95+0.10*vnoise(p*520.0);
+        float ph=fract(uTime/8.2);
+        float reach=0.048*(ph<0.26?smoothstep(0.0,0.26,ph):1.0-smoothstep(0.26,1.0,ph));
+        reach*=1.0-uCalm*0.78;
+        float front=-0.004-reach;
+        float wet=smoothstep(front+0.012,front-0.030,d)*smoothstep(-0.10,-0.02,d);
+        sand=mix(sand,sand*vec3(0.62,0.68,0.66),wet*0.78);
+        sand+=pow(max(L.y,0.0),8.0)*wet*vec3(0.20,0.26,0.25)*(0.5+0.5*sin(uTime*1.1+p.x*30.0));
+        float lace=fbm(p*vec2(150.0,115.0)+vec2(uTime*0.30,0.0));
+        float band=smoothstep(0.017,0.0,abs(d-front))*smoothstep(0.36,0.62,lace+0.20);
+        float holes=1.0-0.55*step(0.62,vnoise(p*vec2(300.0,240.0)+uTime*0.12));
+        float foam=band*holes;
+        breakFoam=smoothstep(0.022,-0.004,abs(d-0.006))*
+          (0.42+0.58*fbm(p*vec2(95.0,72.0)+vec2(uTime*0.55,0.0)));
+        breakFoam*=1.0-uCalm*0.75;
+        beach=mix(sand,vec3(0.94,0.99,0.99),clamp(foam*1.15+breakFoam*0.9,0.0,1.0));
+        beach+=vec3(0.06,0.10,0.10)*foam;
+      }
       col=mix(col,beach,sandMask);
       col+=smoothstep(0.010,0.0,abs(d))*breakFoam*vec3(0.10,0.14,0.13)*(1.0-sandMask*0.4);
       float sh=texture2D(uShadow,sp).r;
@@ -730,6 +743,11 @@ function makeInstanced(base,names,max){
   return {geo:g,at:at};
 }
 function setA(at,name,i,vals){const a=at[name],s=a.itemSize;for(let k=0;k<s;k++)a.array[i*s+k]=vals[k];}
+/* scalar variant for the per-frame hot path: avoids allocating a temp array per creature per attribute */
+function setN(at,name,i,x,y,z,w){
+  const a=at[name],s=a.itemSize,A=a.array,o=i*s;
+  A[o]=x;if(s>1)A[o+1]=y;if(s>2)A[o+2]=z;if(s>3)A[o+3]=w;
+}
 function flushAttrs(at){for(const k in at)at[k].needsUpdate=true;}
 const RAYN=[{name:'aOffset',size:3},{name:'aP0',size:4},{name:'aP1',size:4}];
 const TAILN=[{name:'aOffset',size:3},{name:'aHeading'},{name:'aScale'},{name:'aPhase'},
@@ -1015,11 +1033,13 @@ const pMat=new THREE.ShaderMaterial({uniforms:{uDpr:{value:pixelRatio}},
       gl_FragColor=vec4(col,soft*vA*a);
     }`,transparent:true,depthTest:false,depthWrite:false});
 const points=new THREE.Points(pGeo,pMat);points.renderOrder=20;points.frustumCulled=false;mainScene.add(points);
+let pDirty=true;
 function emit(x,y,z,vx,vy,vz,life,size,type){
   const i=pCursor;pCursor=(pCursor+1)%PN;
   pPos[i*3]=x;pPos[i*3+1]=y;pPos[i*3+2]=z;
   pVel[i*3]=vx;pVel[i*3+1]=vy;pVel[i*3+2]=vz;
   pLife[i]=1;pMax[i]=life;pSize[i]=size;pType[i]=type;
+  pDirty=true;
 }
 function burst(x,z,power,type){
   const n=Math.round(clamp(power*22,10,quality<1?20:38));
@@ -1030,8 +1050,10 @@ function burst(x,z,power,type){
   }
 }
 function updateParticles(dt){
+  let active=false;
   for(let i=0;i<PN;i++){
     if(pLife[i]<=0)continue;
+    active=true;
     pLife[i]-=dt/pMax[i];
     if(pLife[i]<=0){pLife[i]=0;pPos[i*3+1]=-999;continue;}
     pVel[i*3+1]-=11.0*dt;
@@ -1039,8 +1061,11 @@ function updateParticles(dt){
     if(pPos[i*3+1]<0&&pType[i]===1){pLife[i]=0;pPos[i*3+1]=-999;}
     else if(pPos[i*3+1]<0&&pVel[i*3+1]<0)pVel[i*3+1]*=-0.20;
   }
+  /* skip four full buffer uploads every frame when nothing is moving */
+  if(!active&&!pDirty)return;
   pGeo.attributes.position.needsUpdate=true;pGeo.attributes.aLife.needsUpdate=true;
   pGeo.attributes.aSize.needsUpdate=true;pGeo.attributes.aType.needsUpdate=true;
+  pDirty=false;
 }
 
 /* ==================== audio ==================== */
@@ -1083,9 +1108,15 @@ function soundChime(){
 function fract(v){return v-Math.floor(v);}
 function updateAudio(){
   if(!Audio_.ctx)return;
+  if(!Audio_.on){
+    /* muted: the target is constant, so schedule it once instead of every frame */
+    if(!Audio_.muted){Audio_.muted=true;Audio_.gain.gain.setTargetAtTime(0.0001,Audio_.ctx.currentTime,0.12);}
+    return;
+  }
+  Audio_.muted=false;
   const ph=fract(time/8.2);
   const env=ph<0.26?Math.sin(ph/0.26*Math.PI):Math.pow(1-(ph-0.26)/0.74,1.5)*0.55;
-  const g=Audio_.on?(0.014+env*0.105)*(1-calmV*0.7):0.0001;
+  const g=(0.014+env*0.105)*(1-calmV*0.7);
   Audio_.gain.gain.setTargetAtTime(g,Audio_.ctx.currentTime,0.12);
   Audio_.filter.frequency.setTargetAtTime(360+env*900+rainV*300,Audio_.ctx.currentTime,0.2);
 }
@@ -1161,6 +1192,12 @@ function makeThumbs(){
   CU.uTime.value=0;
   for(let s=0;s<MAXC;s++){jellyA[s].set(0,0,0,0);jellyB[s].set(0,0,0,0);}
   tr.dispose();
+  /* dispose() frees GL resources but leaves a second live WebGL context attached to
+     the discarded canvas; explicitly lose it so the driver can reclaim it */
+  try{
+    const ext=tr.getContext().getExtension('WEBGL_lose_context');
+    if(ext)ext.loseContext();
+  }catch(e){}
   return arr;
 }
 
@@ -1168,7 +1205,9 @@ function makeThumbs(){
 const creatures=[];
 const slots=new Array(MAXC).fill(false);
 function takeSlot(){for(let i=0;i<MAXC;i++)if(!slots[i]){slots[i]=true;return i;}return -1;}
-function worldToUV(x,z){return [clamp(x/W+0.5,0,1),clamp(z/H+0.5,0,1)];}
+/* reused scratch array: every caller consumes the result immediately, never stores it */
+const _uv2=[0,0];
+function worldToUV(x,z){_uv2[0]=clamp(x/W+0.5,0,1);_uv2[1]=clamp(z/H+0.5,0,1);return _uv2;}
 function uvToWorld(u,v){return [(u-0.5)*W,(v-0.5)*H];}
 function shoreAtUV(u,v){const qx=u+0.02,qy=(v+0.02)*1.12;return Math.sqrt(qx*qx+qy*qy)-0.355;}
 function spawn(kind,opt){
@@ -1461,19 +1500,19 @@ function uploadCreatures(){
     sh[sn++].set(uv[0],uv[1],c.size/W*1.35*(1+c.sub*0.35));
     if(isRay(c.kind)){
       const flap=c.kind<2?(c.rest?0.25:1.0):0.0;
-      setA(rayInst.at,'aOffset',rn,[c.x,c.y,c.z]);
-      setA(rayInst.at,'aP0',rn,[c.heading,c.size,c.phase,c.bank]);
-      setA(rayInst.at,'aP1',rn,[c.sub,flap,c.kind,c.flip]);
-      setA(tailInst.at,'aOffset',rn,[c.x,c.y,c.z]);
-      setA(tailInst.at,'aHeading',rn,[c.heading]);setA(tailInst.at,'aScale',rn,[c.size]);
-      setA(tailInst.at,'aPhase',rn,[c.phase]);setA(tailInst.at,'aKind',rn,[c.kind]);
-      setA(tailInst.at,'aActive',rn,[1]);setA(tailInst.at,'aSub',rn,[c.sub]);
+      setN(rayInst.at,'aOffset',rn,c.x,c.y,c.z);
+      setN(rayInst.at,'aP0',rn,c.heading,c.size,c.phase,c.bank);
+      setN(rayInst.at,'aP1',rn,c.sub,flap,c.kind,c.flip);
+      setN(tailInst.at,'aOffset',rn,c.x,c.y,c.z);
+      setN(tailInst.at,'aHeading',rn,c.heading);setN(tailInst.at,'aScale',rn,c.size);
+      setN(tailInst.at,'aPhase',rn,c.phase);setN(tailInst.at,'aKind',rn,c.kind);
+      setN(tailInst.at,'aActive',rn,1);setN(tailInst.at,'aSub',rn,c.sub);
       rn++;
     }else{
-      setA(bellInst.at,'aOffset',jn,[c.x,c.y,c.z]);
-      setA(bellInst.at,'aScale',jn,[c.size]);setA(bellInst.at,'aPhase',jn,[c.phase]);
-      setA(bellInst.at,'aKind',jn,[c.kind-3]);setA(bellInst.at,'aActive',jn,[1]);
-      setA(bellInst.at,'aSub',jn,[c.sub]);setA(bellInst.at,'aTilt',jn,[c.tilt]);
+      setN(bellInst.at,'aOffset',jn,c.x,c.y,c.z);
+      setN(bellInst.at,'aScale',jn,c.size);setN(bellInst.at,'aPhase',jn,c.phase);
+      setN(bellInst.at,'aKind',jn,c.kind-3);setN(bellInst.at,'aActive',jn,1);
+      setN(bellInst.at,'aSub',jn,c.sub);setN(bellInst.at,'aTilt',jn,c.tilt);
       jellyA[c.slot].set(c.x,c.y,c.z,c.size);
       jellyB[c.slot].set(c.vx,c.vz,c.y>0.4?1:0,c.phase);
       jn++;
@@ -1486,8 +1525,13 @@ function uploadCreatures(){
 
 /* ==================== main loop ==================== */
 let last=performance.now(),frames=0,fpsT=0,booted=false,shadowTick=0;
+let appliedPixel=-1,appliedQuality=-1,goodWindows=0,warmupUntil=0,cooldownUntil=0;
+const _projV=new THREE.Vector3();
 function applyQuality(){
   pixelRatio=quality===2?DPRMAX:quality===1?Math.min(1.25,DPRMAX):0.8;
+  /* skip redundant resize/reallocation when the tier did not actually change */
+  if(pixelRatio===appliedPixel&&quality===appliedQuality)return;
+  appliedPixel=pixelRatio;appliedQuality=quality;
   fit();pMat.uniforms.uDpr.value=pixelRatio;
   waterUniforms.uQuality.value=quality;
 }
@@ -1495,13 +1539,23 @@ function animate(now){
   requestAnimationFrame(animate);
   const dt=Math.min((now-last)/1000,0.05);last=now;
   time+=dt;
+  /* shader compilation and one-off bakes skew the first seconds; ignore them.
+     Downshift thresholds are unchanged from the original, so this never lowers
+     quality sooner than before - it only stops the up/down thrash. */
+  if(!warmupUntil)warmupUntil=now+2500;
   frames++;fpsT+=dt;
   if(fpsT>1.7){
     const fps=frames/fpsT;
-    if(fps<30&&quality>0){quality--;applyQuality();}
-    else if(fps<47&&quality>1){quality--;applyQuality();}
-    else if(fps>56&&quality<2){quality++;applyQuality();}
     frames=0;fpsT=0;
+    if(now>=warmupUntil&&now>=cooldownUntil){
+      if(fps<30&&quality>0){quality--;applyQuality();cooldownUntil=now+4000;goodWindows=0;}
+      else if(fps<47&&quality>1){quality--;applyQuality();cooldownUntil=now+4000;goodWindows=0;}
+      else if(fps>56&&quality<2){
+        /* three consecutive good windows before climbing back up: prevents the
+           old oscillation that repeatedly rebuilt the drawing buffer */
+        if(++goodWindows>=3){quality++;applyQuality();cooldownUntil=now+4000;goodWindows=0;}
+      }else goodWindows=0;
+    }
   }
   calmV=lerp(calmV,calm?1:0,dt*1.4);
   rainV=lerp(rainV,rainOn?1:0,dt*2.0);
@@ -1536,9 +1590,9 @@ function animate(now){
     renderer.setRenderTarget(null);
   }
   if(whirlOn){
-    const v=new THREE.Vector3(whirl.x,0,whirl.z).project(camera);
-    whirlEl.style.left=((v.x*0.5+0.5)*window.innerWidth)+'px';
-    whirlEl.style.top=((-v.y*0.5+0.5)*window.innerHeight)+'px';
+    _projV.set(whirl.x,0,whirl.z).project(camera);
+    whirlEl.style.left=((_projV.x*0.5+0.5)*window.innerWidth)+'px';
+    whirlEl.style.top=((-_projV.y*0.5+0.5)*window.innerHeight)+'px';
   }
   renderer.render(mainScene,camera);
   if(!booted){booted=true;document.getElementById('boot').classList.add('gone');}
